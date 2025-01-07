@@ -1,7 +1,7 @@
 CC = clang
 CFLAGS = -std=c99 -g3 -Wall -Wextra -Werror
 LLIBS = -lglfw
-IDIR = -Ithird_party/glad/include
+IDIR = -Ithird_party/glad/include -Ithird_party
 
 bin/main: src/main.c bin/glad.o | bin
 	${CC} ${CFLAGS} ${LLIBS} ${IDIR} src/main.c bin/glad.o -o bin/main
