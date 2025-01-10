@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #include <cglm/cglm.h>
 #include <glad/glad.h>
@@ -18,7 +19,10 @@ enum {
     MAX_VERT = 4096,
     MAX_IDX = 16384,
 
-    ONE_MB = 1024 * 1024
+    ONE_MB = 1024 * 1024,
+
+    GRID_WIDTH = 20,
+    GRID_HEIGHT = GRID_WIDTH
 };
 
 typedef struct {
@@ -36,6 +40,7 @@ typedef struct {
 static Window_State g_window_state;
 static Gl_State g_gl_state;
 static char g_gl_error_buffer[ONE_MB];
+static int g_grid_state[GRID_WIDTH * GRID_HEIGHT];
 
 void exit_with_error(const char *msg, ...);
 void trace_log(const char *msg, ...);
@@ -51,7 +56,7 @@ Gl_State initialize_gl_state();
 uint32_t build_shader_from_file(const char *file_path, GLenum shader_type);
 uint32_t link_vert_frag_shaders(uint32_t vert, uint32_t frag);
 uint32_t build_shaders(const char *vert_file, const char *frag_file);
-void sub_vertex_data();
+void sub_vertex_data(float screen_width, float screen_height);
 
 int main() {
     if (!glfwInit()) {
@@ -70,6 +75,7 @@ int main() {
     glfwMakeContextCurrent(g_window_state.glfw_window);
 
     glfwSetKeyCallback(g_window_state.glfw_window, keyboard_callback);
+    glfwSetWindowSizeCallback(g_window_state.glfw_window, window_size_callback);
 
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
         exit_with_error("Fail to load GL function pointers");
@@ -87,7 +93,22 @@ int main() {
 
     glClearColor(0.09f, 0.07f, 0.07f, 1.0f);
 
-    sub_vertex_data();
+    glUseProgram(g_gl_state.shader);
+
+    glUniform1i(glGetUniformLocation(g_gl_state.shader, "grid_w"), GRID_WIDTH);
+    glUniform1i(glGetUniformLocation(g_gl_state.shader, "grid_h"), GRID_HEIGHT);
+
+    for (int i = 0; i < GRID_WIDTH * GRID_HEIGHT; i++) {
+        if (i < 20) {
+            g_grid_state[i] = 0;
+        } else {
+            g_grid_state[i] = rand() % 2;
+        }
+    }
+
+    glUniform1iv(glGetUniformLocation(g_gl_state.shader, "grid_state"), GRID_WIDTH * GRID_HEIGHT, g_grid_state);
+
+    glUseProgram(0);
 
     trace_log("Entering main loop...");
 
@@ -97,7 +118,7 @@ int main() {
         glUseProgram(g_gl_state.shader);
 
         glBindVertexArray(g_gl_state.vao);
-        glDrawElements(GL_TRIANGLES, 3, GL_UNSIGNED_INT, 0);
+        glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
         glBindVertexArray(0);
 
         glUseProgram(0);
@@ -160,6 +181,7 @@ void set_window_size(int width, int height) {
 
     glViewport(0, 0, width, height);
     set_ortho_projection(width, height);
+    sub_vertex_data((float)width, (float)height);
 }
 
 void set_ortho_projection(int width, int height) {
@@ -215,9 +237,10 @@ uint32_t build_shader_from_file(const char *file_path, GLenum shader_type) {
     size_t file_size = ftell(file);
     rewind(file);
 
-    char *shader_src = xmalloc(file_size);
+    char *shader_src = xmalloc(file_size + 1);
     fread(shader_src, file_size, 1, file);
     fclose(file);
+    shader_src[file_size] = '\0';
 
     uint32_t shader_id = glCreateShader(shader_type);
     glShaderSource(shader_id, 1, (const char **)&shader_src, NULL);
@@ -266,12 +289,12 @@ uint32_t build_shaders(const char *vert_file, const char *frag_file) {
     return shader_program;
 }
 
-void sub_vertex_data() {
+void sub_vertex_data(float screen_width, float screen_height) {
     glBindBuffer(GL_ARRAY_BUFFER, g_gl_state.vbo);
 
     size_t total_size = MAX_VERT * (2) * sizeof(float);
-    size_t vert_to_sub_count = 3;
-    size_t idx_to_sub_count = 3;
+    size_t vert_to_sub_count = 4;
+    size_t idx_to_sub_count = 6;
     assert(vert_to_sub_count < MAX_VERT);
     assert(idx_to_sub_count < MAX_IDX);
     size_t stride, offset;
@@ -280,9 +303,10 @@ void sub_vertex_data() {
     offset = 0;
     stride = 2 * sizeof(float);
     float positions[] = {
-        200.0f, 450.0f,
-        600.0f, 450.0f,
-        400.0f, 150.0f
+        0.0f, 0.0f,
+        0.0f, screen_height,
+        screen_width, 0.0f,
+        screen_width, screen_height,
     };
     assert(sizeof(positions) == stride * vert_to_sub_count);
     glBufferSubData(GL_ARRAY_BUFFER, offset, sizeof(positions), positions);
@@ -295,7 +319,8 @@ void sub_vertex_data() {
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_gl_state.ebo);
 
     uint32_t indices[] = {
-        0, 1, 2
+        0, 1, 2,
+        2, 1, 3
     };
     assert(sizeof(indices) / sizeof(indices[0]) == idx_to_sub_count);
     glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, sizeof(indices), indices);
