@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 
 #include <cglm/cglm.h>
 #include <glad/glad.h>
@@ -26,6 +27,11 @@ enum {
     GRID_WIDTH = 20,
     GRID_HEIGHT = GRID_WIDTH
 };
+
+typedef enum {
+    Cell_State_Alive = 1,
+    Cell_State_Dead = 0
+} Cell_State;
 
 typedef struct {
     int w, h;
@@ -66,8 +72,10 @@ uint32_t link_vert_frag_shaders(uint32_t vert, uint32_t frag);
 uint32_t build_shaders(const char *vert_file, const char *frag_file);
 void sub_vertex_data(float screen_width, float screen_height);
 
+Grid_State seed_new_grid(int w, int h, uint32_t seed);
 Grid_State compute_new_grid_state(Grid_State previous);
 void update_gpu_info(Grid_State grid_state);
+void draw_grid();
 
 int main() {
     if (!glfwInit()) {
@@ -111,10 +119,7 @@ int main() {
     glUniform1f(glGetUniformLocation(g_gl_state.shader, "canvas_h"), (float)CANVAS_HEIGHT);
     glUseProgram(0);
 
-    g_grid_state.w = GRID_WIDTH;
-    g_grid_state.h = GRID_HEIGHT;
-
-    g_grid_state = compute_new_grid_state(g_grid_state);
+    g_grid_state = seed_new_grid(GRID_WIDTH, GRID_HEIGHT, (uint32_t)time(NULL));
     update_gpu_info(g_grid_state);
 
     trace_log("Entering main loop...");
@@ -122,13 +127,7 @@ int main() {
     while (!glfwWindowShouldClose(g_window_state.glfw_window)) {
         glClear(GL_COLOR_BUFFER_BIT);
 
-        glUseProgram(g_gl_state.shader);
-
-        glBindVertexArray(g_gl_state.vao);
-        glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
-        glBindVertexArray(0);
-
-        glUseProgram(0);
+        draw_grid();
 
         glfwSwapBuffers(g_window_state.glfw_window);
         glfwPollEvents();
@@ -173,9 +172,11 @@ void keyboard_callback(GLFWwindow *window, int key, int scancode, int action, in
     if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
         trace_log("Received ESC. Terminating...");
         glfwSetWindowShouldClose(window, true);
-    }
-    else if (key == GLFW_KEY_SPACE && (action == GLFW_PRESS || action == GLFW_REPEAT)) {
+    } else if (key == GLFW_KEY_SPACE && (action == GLFW_PRESS || action == GLFW_REPEAT)) {
         g_grid_state = compute_new_grid_state(g_grid_state);
+        update_gpu_info(g_grid_state);
+    } else if (key == GLFW_KEY_ENTER && action == GLFW_PRESS) {
+        g_grid_state = seed_new_grid(g_grid_state.w, g_grid_state.h, (uint32_t)time(NULL));
         update_gpu_info(g_grid_state);
     }
 }
@@ -338,13 +339,44 @@ void sub_vertex_data(float screen_width, float screen_height) {
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 }
 
-Grid_State compute_new_grid_state(Grid_State previous) {
-    Grid_State new_state;
-    new_state.w = previous.w;
-    new_state.h = previous.h;
-    for (int i = 0; i < new_state.w * new_state.h; i++) {
-        new_state.cells[i] = rand() % 2;
+int count_alive_neighbors(const Grid_State *state, int x, int y) {
+    int alive_neighbors = 0;
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            if (dx == 0 && dy == 0) continue;
+            int neighbor_x = (x + dx + state->w) % state->w;
+            int neighbor_y = (y + dy + state->h) % state->h;
+            alive_neighbors += (int)state->cells[neighbor_y * state->w + neighbor_x];
+        }
     }
+    return alive_neighbors;
+}
+
+Grid_State compute_new_grid_state(Grid_State prev_state) {
+    Grid_State new_state;
+    new_state.w = prev_state.w;
+    new_state.h = prev_state.h;
+
+    for (int y = 0; y < new_state.h; y++) {
+        for (int x = 0; x < new_state.w; x++) {
+            int alive_neighbors = count_alive_neighbors(&prev_state, x, y);
+
+            if (prev_state.cells[y * new_state.w + x] == Cell_State_Alive) {
+                if (alive_neighbors < 2 || alive_neighbors > 3) {
+                    new_state.cells[y * new_state.w + x] = Cell_State_Dead;
+                } else {
+                    new_state.cells[y * new_state.w + x] = Cell_State_Alive;
+                }
+            } else {
+                if (alive_neighbors == 3) {
+                    new_state.cells[y * new_state.w + x] = Cell_State_Alive;
+                } else {
+                    new_state.cells[y * new_state.w + x] = Cell_State_Dead;
+                }
+            }
+        }
+    }
+
     return new_state;
 }
 
@@ -353,5 +385,25 @@ void update_gpu_info(Grid_State grid_state) {
     glUniform1i(glGetUniformLocation(g_gl_state.shader, "grid_w"), grid_state.w);
     glUniform1i(glGetUniformLocation(g_gl_state.shader, "grid_h"), grid_state.h);
     glUniform1iv(glGetUniformLocation(g_gl_state.shader, "grid_state"), grid_state.w * grid_state.h, grid_state.cells);
+    glUseProgram(0);
+}
+
+Grid_State seed_new_grid(int w, int h, uint32_t seed) {
+    srand(seed);
+
+    Grid_State new_grid;
+    new_grid.w = w;
+    new_grid.h = h;
+    for (int i = 0; i < new_grid.w * new_grid.h; i++) {
+        new_grid.cells[i] = (rand() % 10 == 0);
+    }
+    return new_grid;
+}
+
+void draw_grid() {
+    glUseProgram(g_gl_state.shader);
+    glBindVertexArray(g_gl_state.vao);
+    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+    glBindVertexArray(0);
     glUseProgram(0);
 }
