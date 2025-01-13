@@ -11,7 +11,9 @@
 #include <GLFW/glfw3.h>
 
 #define VERT_SHADER "res/shaders/canvas.vert.glsl"
-#define FRAG_SHADER "res/shaders/grid.frag.glsl"
+#define CPU_FRAG_SHADER "res/shaders/grid_cpu.frag.glsl"
+#define COMPUTE_FRAG_SHADER "res/shaders/grid_compute.frag.glsl"
+#define GOL_COMPUTE_SHADER "res/shaders/game_of_life.comp.glsl"
 
 enum {
     SCREEN_WIDTH = 800,
@@ -42,7 +44,9 @@ typedef struct {
     uint32_t vbo;
     uint32_t ebo;
     uint32_t vao;
-    uint32_t shader;
+    uint32_t cpu_computed_render_shader;
+    uint32_t gpu_computed_render_shader;
+    uint32_t gol_compute_shader;
 } Gl_State;
 
 typedef struct {
@@ -55,6 +59,9 @@ static Window_State g_window_state;
 static Gl_State g_gl_state;
 static char g_gl_error_buffer[ONE_MB];
 static Grid_State g_grid_state;
+
+static uint32_t g_compute_input_tex;
+static uint32_t g_compute_output_tex;
 
 void exit_with_error(const char *msg, ...);
 void trace_log(const char *msg, ...);
@@ -69,13 +76,18 @@ void set_ortho_projection(int width, int height);
 Gl_State initialize_gl_state();
 uint32_t build_shader_from_file(const char *file_path, GLenum shader_type);
 uint32_t link_vert_frag_shaders(uint32_t vert, uint32_t frag);
+uint32_t link_comp_shader(uint32_t comp);
 uint32_t build_shaders(const char *vert_file, const char *frag_file);
+uint32_t build_compute_shader(const char *file_path);
 void sub_vertex_data(float screen_width, float screen_height);
 
 Grid_State seed_new_grid(int w, int h, uint32_t seed);
 Grid_State compute_new_grid_state(Grid_State previous);
 void update_gpu_info(Grid_State grid_state);
 void draw_grid();
+
+void create_compute_textures();
+void run_gol_compute_procedure();
 
 int main() {
     if (!glfwInit()) {
@@ -114,20 +126,39 @@ int main() {
 
     sub_vertex_data((float)CANVAS_WIDTH, (float)CANVAS_HEIGHT);
 
-    glUseProgram(g_gl_state.shader);
-    glUniform1f(glGetUniformLocation(g_gl_state.shader, "canvas_w"), (float)CANVAS_WIDTH);
-    glUniform1f(glGetUniformLocation(g_gl_state.shader, "canvas_h"), (float)CANVAS_HEIGHT);
+    glUseProgram(g_gl_state.cpu_computed_render_shader);
+    glUniform1f(glGetUniformLocation(g_gl_state.cpu_computed_render_shader, "canvas_w"), (float)CANVAS_WIDTH);
+    glUniform1f(glGetUniformLocation(g_gl_state.cpu_computed_render_shader, "canvas_h"), (float)CANVAS_HEIGHT);
+    glUseProgram(0);
+
+    glUseProgram(g_gl_state.gpu_computed_render_shader);
+    glUniform1f(glGetUniformLocation(g_gl_state.gpu_computed_render_shader, "canvas_w"), (float)CANVAS_WIDTH);
+    glUniform1f(glGetUniformLocation(g_gl_state.gpu_computed_render_shader, "canvas_h"), (float)CANVAS_HEIGHT);
+
     glUseProgram(0);
 
     g_grid_state = seed_new_grid(GRID_WIDTH, GRID_HEIGHT, (uint32_t)time(NULL));
     update_gpu_info(g_grid_state);
+
+    create_compute_textures();
+
+    glUseProgram(g_gl_state.gol_compute_shader);
+    glUniform2i(glGetUniformLocation(g_gl_state.gol_compute_shader, "grid_size"), g_grid_state.w, g_grid_state.h);
+    glUseProgram(0);
+
+    /* run_gol_compute_procedure(); */
 
     trace_log("Entering main loop...");
 
     while (!glfwWindowShouldClose(g_window_state.glfw_window)) {
         glClear(GL_COLOR_BUFFER_BIT);
 
-        draw_grid();
+        // draw_grid();
+        glUseProgram(g_gl_state.gpu_computed_render_shader);
+        glBindVertexArray(g_gl_state.vao);
+        glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+        glBindVertexArray(0);
+        glUseProgram(0);
 
         glfwSwapBuffers(g_window_state.glfw_window);
         glfwPollEvents();
@@ -175,6 +206,7 @@ void keyboard_callback(GLFWwindow *window, int key, int scancode, int action, in
     } else if (key == GLFW_KEY_SPACE && (action == GLFW_PRESS || action == GLFW_REPEAT)) {
         g_grid_state = compute_new_grid_state(g_grid_state);
         update_gpu_info(g_grid_state);
+        run_gol_compute_procedure();
     } else if (key == GLFW_KEY_ENTER && action == GLFW_PRESS) {
         g_grid_state = seed_new_grid(g_grid_state.w, g_grid_state.h, (uint32_t)time(NULL));
         update_gpu_info(g_grid_state);
@@ -199,8 +231,12 @@ void set_ortho_projection(int width, int height) {
     mat4 projection;
     glm_ortho(0.0f, width, height, 0.0f, -1.0f, 1.0f, projection);
 
-    glUseProgram(g_gl_state.shader);
-    glUniformMatrix4fv(glGetUniformLocation(g_gl_state.shader, "projection"), 1, GL_FALSE, (float *)projection);
+    glUseProgram(g_gl_state.cpu_computed_render_shader);
+    glUniformMatrix4fv(glGetUniformLocation(g_gl_state.cpu_computed_render_shader, "projection"), 1, GL_FALSE, (float *)projection);
+    glUseProgram(0);
+
+    glUseProgram(g_gl_state.gpu_computed_render_shader);
+    glUniformMatrix4fv(glGetUniformLocation(g_gl_state.gpu_computed_render_shader, "projection"), 1, GL_FALSE, (float *)projection);
     glUseProgram(0);
 }
 
@@ -233,9 +269,11 @@ Gl_State initialize_gl_state() {
     glBindVertexArray(0);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 
-    result.shader = build_shaders(VERT_SHADER, FRAG_SHADER);
+    result.cpu_computed_render_shader = build_shaders(VERT_SHADER, CPU_FRAG_SHADER);
+    result.gpu_computed_render_shader = build_shaders(VERT_SHADER, COMPUTE_FRAG_SHADER);
+    result.gol_compute_shader = build_compute_shader(GOL_COMPUTE_SHADER);
 
-     return result;
+    return result;
 }
 
 uint32_t build_shader_from_file(const char *file_path, GLenum shader_type) {
@@ -282,7 +320,23 @@ uint32_t link_vert_frag_shaders(uint32_t vert, uint32_t frag) {
 
     if (!success) {
         glGetProgramInfoLog(program_id, ONE_MB, NULL, g_gl_error_buffer);
-        exit_with_error("Failed to link shader program. Error:\n  %s", g_gl_error_buffer);
+        exit_with_error("Failed to link vert-frag shader program. Error:\n  %s", g_gl_error_buffer);
+    }
+
+    return program_id;
+}
+
+uint32_t link_comp_shader(uint32_t comp) {
+    uint32_t program_id = glCreateProgram();
+    glAttachShader(program_id, comp);
+    glLinkProgram(program_id);
+
+    int success;
+    glGetProgramiv(program_id, GL_LINK_STATUS, &success);
+
+    if (!success) {
+        glGetProgramInfoLog(program_id, ONE_MB, NULL, g_gl_error_buffer);
+        exit_with_error("Failed to link comp shader program. Error:\n  %s", g_gl_error_buffer);
     }
 
     return program_id;
@@ -291,13 +345,17 @@ uint32_t link_vert_frag_shaders(uint32_t vert, uint32_t frag) {
 uint32_t build_shaders(const char *vert_file, const char *frag_file) {
     uint32_t vert_shader = build_shader_from_file(vert_file, GL_VERTEX_SHADER);
     uint32_t frag_shader = build_shader_from_file(frag_file, GL_FRAGMENT_SHADER);
-
     uint32_t shader_program = link_vert_frag_shaders(vert_shader, frag_shader);
-
     glDeleteShader(vert_shader);
     glDeleteShader(frag_shader);
-
     return shader_program;
+}
+
+uint32_t build_compute_shader(const char *file_path) {
+    uint32_t comp_shader = build_shader_from_file(file_path, GL_COMPUTE_SHADER);
+    uint32_t program = link_comp_shader(comp_shader);
+    glDeleteShader(comp_shader);
+    return program;
 }
 
 void sub_vertex_data(float screen_width, float screen_height) {
@@ -381,10 +439,16 @@ Grid_State compute_new_grid_state(Grid_State prev_state) {
 }
 
 void update_gpu_info(Grid_State grid_state) {
-    glUseProgram(g_gl_state.shader);
-    glUniform1i(glGetUniformLocation(g_gl_state.shader, "grid_w"), grid_state.w);
-    glUniform1i(glGetUniformLocation(g_gl_state.shader, "grid_h"), grid_state.h);
-    glUniform1iv(glGetUniformLocation(g_gl_state.shader, "grid_state"), grid_state.w * grid_state.h, grid_state.cells);
+    glUseProgram(g_gl_state.cpu_computed_render_shader);
+    glUniform1i(glGetUniformLocation(g_gl_state.cpu_computed_render_shader, "grid_w"), grid_state.w);
+    glUniform1i(glGetUniformLocation(g_gl_state.cpu_computed_render_shader, "grid_h"), grid_state.h);
+    glUniform1iv(glGetUniformLocation(g_gl_state.cpu_computed_render_shader, "grid_state"), grid_state.w * grid_state.h, grid_state.cells);
+    /* glUseProgram(0); */
+
+    glUseProgram(g_gl_state.gpu_computed_render_shader);
+    glUniform1i(glGetUniformLocation(g_gl_state.gpu_computed_render_shader, "grid_w"), grid_state.w);
+    glUniform1i(glGetUniformLocation(g_gl_state.gpu_computed_render_shader, "grid_h"), grid_state.h);
+    /* glUniform1iv(glGetUniformLocation(g_gl_state.gpu_computed_render_shader, "grid_state"), grid_state.w * grid_state.h, grid_state.cells); */
     glUseProgram(0);
 }
 
@@ -401,9 +465,65 @@ Grid_State seed_new_grid(int w, int h, uint32_t seed) {
 }
 
 void draw_grid() {
-    glUseProgram(g_gl_state.shader);
+    glUseProgram(g_gl_state.cpu_computed_render_shader);
     glBindVertexArray(g_gl_state.vao);
     glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
     glBindVertexArray(0);
+    glUseProgram(0);
+}
+
+void create_compute_textures() {
+    uint32_t grid_state_texture[2];
+    glGenTextures(2, grid_state_texture);
+    for (int i = 0; i < 2; i++) {
+        glBindTexture(GL_TEXTURE_2D, grid_state_texture[i]);
+
+        if (i == 0) {
+            uint8_t *r8grid = malloc(g_grid_state.w * g_grid_state.h);
+            for (int j = 0; j < g_grid_state.w * g_grid_state.h; j++) {
+                r8grid[j] = g_grid_state.cells[j] * 255;
+            }
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, g_grid_state.w, g_grid_state.h, 0, GL_RED, GL_UNSIGNED_BYTE, r8grid);
+            free(r8grid);
+        } else {
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, g_grid_state.w, g_grid_state.h, 0, GL_RED, GL_UNSIGNED_BYTE, NULL);
+        }
+
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    }
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    g_compute_input_tex = grid_state_texture[0];
+    g_compute_output_tex = grid_state_texture[1];
+
+    glUseProgram(g_gl_state.gpu_computed_render_shader);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, g_compute_input_tex);
+    glUniform1i(glGetUniformLocation(g_gl_state.gpu_computed_render_shader, "computed_grid_texture"), 0);
+    glUseProgram(0);
+}
+
+void run_gol_compute_procedure() {
+    glUseProgram(g_gl_state.gol_compute_shader);
+    glBindImageTexture(0, g_compute_input_tex, 0, GL_FALSE, 0, GL_READ_ONLY, GL_R8);
+    glBindImageTexture(1, g_compute_output_tex, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R8);
+
+    int work_groups_x = (g_grid_state.w + 15) / 16;
+    int work_groups_y = (g_grid_state.h + 15) / 16;
+    glDispatchCompute(work_groups_x, work_groups_y, 1);
+
+    glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+
+    uint32_t temp = g_compute_input_tex;
+    g_compute_input_tex = g_compute_output_tex;
+    g_compute_output_tex = temp;
+
+    glUseProgram(g_gl_state.gpu_computed_render_shader);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, g_compute_input_tex);
+    glUniform1i(glGetUniformLocation(g_gl_state.gpu_computed_render_shader, "computed_grid_texture"), 0);
     glUseProgram(0);
 }
