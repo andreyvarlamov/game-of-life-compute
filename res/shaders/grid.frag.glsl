@@ -1,15 +1,20 @@
 #version 430 core
 
 layout (location = 0) in vec2 FragPos;
+
 out vec4 FragColor;
 
+uniform float canvas_w;
+uniform float canvas_h;
 uniform int grid_w;
 uniform int grid_h;
 uniform int grid_state[400];
 
 void main() {
-     int x = int((FragPos.x + 1.0) * 0.5 * grid_w);
-     int y = int((-FragPos.y + 1.0) * 0.5 * grid_h);
+     float cell_w = canvas_w / grid_w;
+     float cell_h = canvas_h / grid_h;
+     int x = int(FragPos.x / cell_w);
+     int y = int(FragPos.y / cell_h);
      int idx = y * grid_w + x;
 
      if (grid_state[idx] == 1) {

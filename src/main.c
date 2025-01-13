@@ -9,8 +9,8 @@
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 
-#define VERT_SHADER "res/shaders/basic.vert.glsl"
-#define FRAG_SHADER "res/shaders/basic.frag.glsl"
+#define VERT_SHADER "res/shaders/canvas.vert.glsl"
+#define FRAG_SHADER "res/shaders/grid.frag.glsl"
 
 enum {
     SCREEN_WIDTH = 800,
@@ -21,6 +21,8 @@ enum {
 
     ONE_MB = 1024 * 1024,
 
+    CANVAS_WIDTH = 200,
+    CANVAS_HEIGHT = CANVAS_WIDTH,
     GRID_WIDTH = 20,
     GRID_HEIGHT = GRID_WIDTH
 };
@@ -37,10 +39,16 @@ typedef struct {
     uint32_t shader;
 } Gl_State;
 
+typedef struct {
+    int w;
+    int h;
+    int32_t cells[GRID_WIDTH * GRID_HEIGHT];
+} Grid_State;
+
 static Window_State g_window_state;
 static Gl_State g_gl_state;
 static char g_gl_error_buffer[ONE_MB];
-static int g_grid_state[GRID_WIDTH * GRID_HEIGHT];
+static Grid_State g_grid_state;
 
 void exit_with_error(const char *msg, ...);
 void trace_log(const char *msg, ...);
@@ -57,6 +65,9 @@ uint32_t build_shader_from_file(const char *file_path, GLenum shader_type);
 uint32_t link_vert_frag_shaders(uint32_t vert, uint32_t frag);
 uint32_t build_shaders(const char *vert_file, const char *frag_file);
 void sub_vertex_data(float screen_width, float screen_height);
+
+Grid_State compute_new_grid_state(Grid_State previous);
+void update_gpu_info(Grid_State grid_state);
 
 int main() {
     if (!glfwInit()) {
@@ -93,22 +104,18 @@ int main() {
 
     glClearColor(0.09f, 0.07f, 0.07f, 1.0f);
 
+    sub_vertex_data((float)CANVAS_WIDTH, (float)CANVAS_HEIGHT);
+
     glUseProgram(g_gl_state.shader);
-
-    glUniform1i(glGetUniformLocation(g_gl_state.shader, "grid_w"), GRID_WIDTH);
-    glUniform1i(glGetUniformLocation(g_gl_state.shader, "grid_h"), GRID_HEIGHT);
-
-    for (int i = 0; i < GRID_WIDTH * GRID_HEIGHT; i++) {
-        if (i < 20) {
-            g_grid_state[i] = 0;
-        } else {
-            g_grid_state[i] = rand() % 2;
-        }
-    }
-
-    glUniform1iv(glGetUniformLocation(g_gl_state.shader, "grid_state"), GRID_WIDTH * GRID_HEIGHT, g_grid_state);
-
+    glUniform1f(glGetUniformLocation(g_gl_state.shader, "canvas_w"), (float)CANVAS_WIDTH);
+    glUniform1f(glGetUniformLocation(g_gl_state.shader, "canvas_h"), (float)CANVAS_HEIGHT);
     glUseProgram(0);
+
+    g_grid_state.w = GRID_WIDTH;
+    g_grid_state.h = GRID_HEIGHT;
+
+    g_grid_state = compute_new_grid_state(g_grid_state);
+    update_gpu_info(g_grid_state);
 
     trace_log("Entering main loop...");
 
@@ -167,6 +174,10 @@ void keyboard_callback(GLFWwindow *window, int key, int scancode, int action, in
         trace_log("Received ESC. Terminating...");
         glfwSetWindowShouldClose(window, true);
     }
+    else if (key == GLFW_KEY_SPACE && (action == GLFW_PRESS || action == GLFW_REPEAT)) {
+        g_grid_state = compute_new_grid_state(g_grid_state);
+        update_gpu_info(g_grid_state);
+    }
 }
 
 void window_size_callback(GLFWwindow *window, int width, int height) {
@@ -181,7 +192,6 @@ void set_window_size(int width, int height) {
 
     glViewport(0, 0, width, height);
     set_ortho_projection(width, height);
-    sub_vertex_data((float)width, (float)height);
 }
 
 void set_ortho_projection(int width, int height) {
@@ -326,4 +336,22 @@ void sub_vertex_data(float screen_width, float screen_height) {
     glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, sizeof(indices), indices);
 
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+}
+
+Grid_State compute_new_grid_state(Grid_State previous) {
+    Grid_State new_state;
+    new_state.w = previous.w;
+    new_state.h = previous.h;
+    for (int i = 0; i < new_state.w * new_state.h; i++) {
+        new_state.cells[i] = rand() % 2;
+    }
+    return new_state;
+}
+
+void update_gpu_info(Grid_State grid_state) {
+    glUseProgram(g_gl_state.shader);
+    glUniform1i(glGetUniformLocation(g_gl_state.shader, "grid_w"), grid_state.w);
+    glUniform1i(glGetUniformLocation(g_gl_state.shader, "grid_h"), grid_state.h);
+    glUniform1iv(glGetUniformLocation(g_gl_state.shader, "grid_state"), grid_state.w * grid_state.h, grid_state.cells);
+    glUseProgram(0);
 }
