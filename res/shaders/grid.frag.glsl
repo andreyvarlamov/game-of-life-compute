@@ -1,6 +1,6 @@
 #version 430 core
 
-layout (location = 0) in vec2 FragPos;
+layout(location = 0) in vec2 FragPos;
 
 out vec4 FragColor;
 
@@ -9,7 +9,7 @@ uniform float canvas_h;
 uniform int grid_w;
 uniform int grid_h;
 
-uniform sampler2D computed_grid_texture;
+layout(binding = 0) uniform sampler2D computed_grid_texture;
 
 void main() {
      float x = FragPos.x / canvas_w;

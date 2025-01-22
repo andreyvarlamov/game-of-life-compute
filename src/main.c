@@ -40,14 +40,19 @@ typedef struct {
     uint32_t vao;
     uint32_t render_shader;
     uint32_t gol_compute_shader;
+    char error_msg_buffer[ONE_MB];
 } Gl_State;
+
+typedef struct {
+    int grid_w;
+    int grid_h;
+    uint32_t grid_tex_front;
+    uint32_t grid_tex_back;
+} Game_Of_Life_State;
 
 static Window_State g_window_state;
 static Gl_State g_gl_state;
-static char g_gl_error_buffer[ONE_MB];
-
-static uint32_t g_compute_input_tex;
-static uint32_t g_compute_output_tex;
+static Game_Of_Life_State g_game_of_life_state;
 
 void exit_with_error(const char *msg, ...);
 void trace_log(const char *msg, ...);
@@ -67,8 +72,9 @@ uint32_t build_shaders(const char *vert_file, const char *frag_file);
 uint32_t build_compute_shader(const char *file_path);
 void sub_vertex_data(float screen_width, float screen_height);
 
-void create_compute_textures(int grid_w, int grid_h);
-void run_gol_compute_procedure(int grid_w, int grid_h);
+void create_compute_textures();
+void seed_gol_texture();
+void run_gol_compute_procedure();
 
 int main() {
     if (!glfwInit()) {
@@ -103,8 +109,6 @@ int main() {
 
     set_window_size(SCREEN_WIDTH, SCREEN_HEIGHT);
 
-    glClearColor(0.09f, 0.07f, 0.07f, 1.0f);
-
     sub_vertex_data((float)CANVAS_WIDTH, (float)CANVAS_HEIGHT);
 
     glUseProgram(g_gl_state.render_shader);
@@ -112,20 +116,24 @@ int main() {
     glUniform1f(glGetUniformLocation(g_gl_state.render_shader, "canvas_h"), (float)CANVAS_HEIGHT);
     glUseProgram(0);
 
-    create_compute_textures(GRID_WIDTH, GRID_HEIGHT);
+    g_game_of_life_state.grid_w = GRID_WIDTH;
+    g_game_of_life_state.grid_h = GRID_HEIGHT;
 
     glUseProgram(g_gl_state.gol_compute_shader);
-    glUniform2i(glGetUniformLocation(g_gl_state.gol_compute_shader, "grid_size"), GRID_WIDTH, GRID_HEIGHT);
+    glUniform2i(glGetUniformLocation(g_gl_state.gol_compute_shader, "grid_size"),
+                g_game_of_life_state.grid_w, g_game_of_life_state.grid_h);
     glUseProgram(0);
 
-    /* run_gol_compute_procedure(); */
+    create_compute_textures();
+    seed_gol_texture();
+
+    glClearColor(0.09f, 0.07f, 0.07f, 1.0f);
 
     trace_log("Entering main loop...");
 
     while (!glfwWindowShouldClose(g_window_state.glfw_window)) {
         glClear(GL_COLOR_BUFFER_BIT);
 
-        // draw_grid();
         glUseProgram(g_gl_state.render_shader);
         glBindVertexArray(g_gl_state.vao);
         glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
@@ -176,9 +184,9 @@ void keyboard_callback(GLFWwindow *window, int key, int scancode, int action, in
         trace_log("Received ESC. Terminating...");
         glfwSetWindowShouldClose(window, true);
     } else if (key == GLFW_KEY_SPACE && (action == GLFW_PRESS || action == GLFW_REPEAT)) {
-        run_gol_compute_procedure(GRID_WIDTH, GRID_HEIGHT);
+        run_gol_compute_procedure();
     } else if (key == GLFW_KEY_ENTER && action == GLFW_PRESS) {
-        // TODO
+        seed_gol_texture();
     }
 }
 
@@ -263,9 +271,9 @@ uint32_t build_shader_from_file(const char *file_path, GLenum shader_type) {
     glGetShaderiv(shader_id, GL_COMPILE_STATUS, &success);
 
     if (!success) {
-        glGetShaderInfoLog(shader_id, ONE_MB, NULL, g_gl_error_buffer);
+        glGetShaderInfoLog(shader_id, ONE_MB, NULL, g_gl_state.error_msg_buffer);
         exit_with_error("Failed to compile shader (type 0x%04X). Error:\n  %s\nSource:\n%s\n",
-                        shader_type, g_gl_error_buffer, shader_src);
+                        shader_type, g_gl_state.error_msg_buffer, shader_src);
     }
 
     free(shader_src);
@@ -283,8 +291,8 @@ uint32_t link_vert_frag_shaders(uint32_t vert, uint32_t frag) {
     glGetProgramiv(program_id, GL_LINK_STATUS, &success);
 
     if (!success) {
-        glGetProgramInfoLog(program_id, ONE_MB, NULL, g_gl_error_buffer);
-        exit_with_error("Failed to link vert-frag shader program. Error:\n  %s", g_gl_error_buffer);
+        glGetProgramInfoLog(program_id, ONE_MB, NULL, g_gl_state.error_msg_buffer);
+        exit_with_error("Failed to link vert-frag shader program. Error:\n  %s", g_gl_state.error_msg_buffer);
     }
 
     return program_id;
@@ -299,8 +307,8 @@ uint32_t link_comp_shader(uint32_t comp) {
     glGetProgramiv(program_id, GL_LINK_STATUS, &success);
 
     if (!success) {
-        glGetProgramInfoLog(program_id, ONE_MB, NULL, g_gl_error_buffer);
-        exit_with_error("Failed to link comp shader program. Error:\n  %s", g_gl_error_buffer);
+        glGetProgramInfoLog(program_id, ONE_MB, NULL, g_gl_state.error_msg_buffer);
+        exit_with_error("Failed to link comp shader program. Error:\n  %s", g_gl_state.error_msg_buffer);
     }
 
     return program_id;
@@ -361,23 +369,14 @@ void sub_vertex_data(float screen_width, float screen_height) {
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 }
 
-void create_compute_textures(int grid_w, int grid_h) {
+void create_compute_textures() {
     uint32_t grid_state_texture[2];
     glGenTextures(2, grid_state_texture);
     for (int i = 0; i < 2; i++) {
         glBindTexture(GL_TEXTURE_2D, grid_state_texture[i]);
-
-        if (i == 0) {
-            uint8_t *r8grid = malloc(grid_w * grid_h);
-            for (int j = 0; j < grid_w * grid_h; j++) {
-                r8grid[j] = (rand() % 10 == 0) * 255;
-            }
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, grid_w, grid_h, 0, GL_RED, GL_UNSIGNED_BYTE, r8grid);
-            free(r8grid);
-        } else {
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, grid_w, grid_h, 0, GL_RED, GL_UNSIGNED_BYTE, NULL);
-        }
-
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_R8,
+                     g_game_of_life_state.grid_w, g_game_of_life_state.grid_h,
+                     0, GL_RED, GL_UNSIGNED_BYTE, NULL);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -385,34 +384,44 @@ void create_compute_textures(int grid_w, int grid_h) {
     }
     glBindTexture(GL_TEXTURE_2D, 0);
 
-    g_compute_input_tex = grid_state_texture[0];
-    g_compute_output_tex = grid_state_texture[1];
-
-    glUseProgram(g_gl_state.render_shader);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, g_compute_input_tex);
-    glUniform1i(glGetUniformLocation(g_gl_state.render_shader, "computed_grid_texture"), 0);
-    glUseProgram(0);
+    g_game_of_life_state.grid_tex_front = grid_state_texture[0];
+    g_game_of_life_state.grid_tex_back = grid_state_texture[1];
 }
 
-void run_gol_compute_procedure(int grid_w, int grid_h) {
-    glUseProgram(g_gl_state.gol_compute_shader);
-    glBindImageTexture(0, g_compute_input_tex, 0, GL_FALSE, 0, GL_READ_ONLY, GL_R8);
-    glBindImageTexture(1, g_compute_output_tex, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R8);
+void seed_gol_texture()
+{
+    int cell_count = g_game_of_life_state.grid_w * g_game_of_life_state.grid_h;
+    uint8_t *r8grid = malloc(cell_count);
+    for (int j = 0; j < cell_count; j++) {
+        r8grid[j] = (rand() % 10 == 0) * 255;
+    }
 
-    int work_groups_x = (grid_w + 15) / 16;
-    int work_groups_y = (grid_h + 15) / 16;
+    glBindTexture(GL_TEXTURE_2D, g_game_of_life_state.grid_tex_front);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0,
+                    g_game_of_life_state.grid_w, g_game_of_life_state.grid_h,
+                    GL_RED, GL_UNSIGNED_BYTE, r8grid);
+
+    free(r8grid);
+}
+
+void run_gol_compute_procedure() {
+
+    glBindImageTexture(0, g_game_of_life_state.grid_tex_front, 0, GL_FALSE, 0, GL_READ_ONLY, GL_R8);
+    glBindImageTexture(1, g_game_of_life_state.grid_tex_back, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R8);
+
+    glUseProgram(g_gl_state.gol_compute_shader);
+
+    int work_groups_x = (g_game_of_life_state.grid_w + 15) / 16;
+    int work_groups_y = (g_game_of_life_state.grid_h + 15) / 16;
     glDispatchCompute(work_groups_x, work_groups_y, 1);
+
+    glUseProgram(0);
 
     glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
 
-    uint32_t temp = g_compute_input_tex;
-    g_compute_input_tex = g_compute_output_tex;
-    g_compute_output_tex = temp;
+    uint32_t temp = g_game_of_life_state.grid_tex_front;
+    g_game_of_life_state.grid_tex_front = g_game_of_life_state.grid_tex_back;
+    g_game_of_life_state.grid_tex_back = temp;
 
-    glUseProgram(g_gl_state.render_shader);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, g_compute_input_tex);
-    glUniform1i(glGetUniformLocation(g_gl_state.render_shader, "computed_grid_texture"), 0);
-    glUseProgram(0);
+    glBindTexture(GL_TEXTURE_2D, g_game_of_life_state.grid_tex_front);
 }
